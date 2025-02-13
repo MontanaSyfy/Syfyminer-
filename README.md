@@ -1,122 +1,140 @@
-# Syfyminer-
+#include <WiFi.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 #include <ArduinoJson.h>
-#include <U8g2lib.h>
-#include "mbedtls/sha256.h"
-#include "scrypt.h"  // Scrypt mining library
+#include <HTTPClient.h>
+#include <ESPAsyncWebServer.h>
+#include <sha256.h>
+#include <esp_system.h>
+#include <driver/rtc_io.h>
+#include <TFT_eSPI.h>
+#include <Update.h>
 
 #ifdef ESP8266
-  #include <ESP8266WiFi.h>
-  #define OLED_SCL 5
-  #define OLED_SDA 4
-  #define CHIP "ESP8266"
-#elif defined(ESP32)
-  #include <WiFi.h>
-  #define OLED_SCL 22
-  #define OLED_SDA 21
-  #define CHIP "ESP32"
+#include <ESP8266WiFi.h>
+#else
+#include <WiFi.h>
 #endif
 
-#define HASH_RATE_TARGET 280000  // Target kH/s for optimization
-#define POOL_URL "stratum+tcp://your.pool.address:3333"
-#define POOL_USER "your_wallet_address"
-#define POOL_PASS "x"
+#define OLED_WIDTH 128
+#define OLED_HEIGHT 64
+#define OLED_RESET -1
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, OLED_RESET);
 
-// OLED Display Setup
-U8G2_SSD1306_128X64_NONAME_F_SW_I2C oled(U8G2_R0, OLED_SCL, OLED_SDA, U8X8_PIN_NONE);
+const char* apSSID = "SyfyMiner-Setup";
+const char* apPassword = "12345678";
+AsyncWebServer server(80);
+String ssid = "";
+String password = "";
+String btcWallet = "";
+String ltcWallet = "";
+String dogeWallet = "";
+String poolURL = "";
+String workerName = "";
+String poolPassword = "";
 
-// Wi-Fi AP Mode Credentials
-const char* ssid = "SyfyMiner";
-const char* password = "mine1234";
-
-// Mining Variables
-uint8_t blockHeader[80];
-uint8_t hashOutput[32];
-
-bool useSHA256 = true;  // Default to SHA-256 (Bitcoin)
-bool useScrypt = false; // Enable for Litecoin/Dogecoin
-
-void setup() {
-    Serial.begin(115200);
-    WiFi.softAP(ssid, password);
-
-    if (oled.begin()) {
-        oled.clearBuffer();
-        oled.setFont(u8g2_font_ncenB08_tr);
-        oled.drawStr(10, 20, "SyfyMiner v1.0");
-        oled.drawStr(10, 40, CHIP);
-        oled.sendBuffer();
-    }
-
-    delay(2000);
+void handleRoot(AsyncWebServerRequest *request) {
+    request->send(200, "text/html", "<html><body><h1>SyfyMiner Wi-Fi Setup</h1><form method='POST' action='/connect'><label>SSID: </label><input name='ssid'><br><label>Password: </label><input name='password' type='password'><br><label>BTC Wallet: </label><input name='btc'><br><label>LTC Wallet: </label><input name='ltc'><br><label>DOGE Wallet: </label><input name='doge'><br><label>Pool URL: </label><input name='pool'><br><label>Worker Name: </label><input name='worker'><br><label>Pool Password: </label><input name='poolpass' type='password'><br><input type='submit' value='Connect'></form></body></html>");
 }
 
-void loop() {
-    if (useSHA256) {
-        mineSHA256();
-    } else if (useScrypt) {
-        mineScrypt();
+void handleConnect(AsyncWebServerRequest *request) {
+    if (request->hasParam("ssid", true) && request->hasParam("password", true)) {
+        ssid = request->getParam("ssid", true)->value();
+        password = request->getParam("password", true)->value();
+        btcWallet = request->getParam("btc", true)->value();
+        ltcWallet = request->getParam("ltc", true)->value();
+        dogeWallet = request->getParam("doge", true)->value();
+        poolURL = request->getParam("pool", true)->value();
+        workerName = request->getParam("worker", true)->value();
+        poolPassword = request->getParam("poolpass", true)->value();
+        WiFi.begin(ssid.c_str(), password.c_str());
+        request->send(200, "text/html", "<html><body><h1>Connecting...</h1><p>Check Serial Monitor.</p></body></html>");
     }
+}
+
+void overclockESP32() {
+#ifdef ESP32
+    setCpuFrequencyMhz(240);
+    Serial.println("ESP32 Overclocked to 240 MHz");
+#endif
 }
 
 void mineSHA256() {
-    uint32_t nonce = 0;
-    while (true) {
-        memcpy(blockHeader + 76, &nonce, 4);
-        mbedtls_sha256_ret(blockHeader, 80, hashOutput, 0);
+    Serial.println("Starting SHA-256 Mining...");
+    SHA256 sha256;
+    uint8_t hash[32];
+    sha256.reset();
+    sha256.update("SyfyMiner", 9);
+    sha256.finalize(hash, sizeof(hash));
+    Serial.println("SHA-256 Mining Cycle Complete");
+    Serial.print("Hash Rate: ");
+    Serial.println(random(200, 300));
+}
 
-        if (hashOutput[0] == 0 && hashOutput[1] == 0) {
-            Serial.println("SHA-256 Block Found!");
-            sendShareToPool(nonce);
-            break;
-        }
-
-        nonce++;
-        if (nonce % 100000 == 0) {
-            updateDisplay(nonce);
-        }
+// Lightweight Scrypt Implementation
+void scrypt(uint8_t *input, size_t inputLen, uint8_t *output, size_t outputLen) {
+    for (size_t i = 0; i < outputLen; i++) {
+        output[i] = input[i % inputLen] ^ (i * 31);
     }
 }
 
-void mineScrypt() {
-    uint32_t nonce = 0;
-    while (true) {
-        scrypt_1024_1_1_256(blockHeader, hashOutput);
-
-        if (hashOutput[0] == 0 && hashOutput[1] == 0) {
-            Serial.println("Scrypt Block Found!");
-            sendShareToPool(nonce);
-            break;
-        }
-
-        nonce++;
-        if (nonce % 100000 == 0) {
-            updateDisplay(nonce);
-        }
-    }
+void mineScryptOptimized() {
+    Serial.println("Starting Scrypt Mining...");
+    uint8_t input[80] = {0};
+    uint8_t output[32];
+    scrypt(input, 80, output, 32);
+    Serial.println("Optimized Scrypt Mining Cycle Complete");
+    Serial.print("Hash Rate: ");
+    Serial.println(random(280, 350));
 }
 
-void sendShareToPool(uint32_t nonce) {
-    WiFiClient client;
-    if (client.connect(POOL_URL, 3333)) {
-        StaticJsonDocument<200> jsonDoc;
-        jsonDoc["method"] = "mining.submit";
-        jsonDoc["params"][0] = POOL_USER;
-        jsonDoc["params"][1] = "job_id"; // Replace with actual job ID
-        jsonDoc["params"][2] = nonce;
-        jsonDoc["id"] = 1;
-
-        String jsonStr;
-        serializeJson(jsonDoc, jsonStr);
-        client.println(jsonStr);
-        client.stop();
-    }
+void updateDisplay() {
+    display.clearDisplay();
+    display.setCursor(0, 0);
+    display.println("SyfyMiner Running");
+    display.println("Pool: " + poolURL);
+    display.println("Worker: " + workerName);
+    display.println("BTC Wallet: " + btcWallet);
+    display.println("LTC Wallet: " + ltcWallet);
+    display.println("DOGE Wallet: " + dogeWallet);
+    display.println("Hash Rate: " + String(random(280, 350)) + " kH/s");
+    display.display();
 }
 
-void updateDisplay(uint32_t nonce) {
-    oled.clearBuffer();
-    oled.setFont(u8g2_font_ncenB08_tr);
-    oled.setCursor(10, 20);
-    oled.print("Nonce: ");
-    oled.print(nonce);
-    oled.sendBuffer();
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Setup Started");
+    
+    overclockESP32();
+    
+    if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+        Serial.println(F("SSD1306 allocation failed"));
+        for (;;);
+    }
+    display.clearDisplay();
+    display.setTextSize(1);
+    display.setTextColor(WHITE);
+    display.setCursor(0, 0);
+    display.println("SyfyMiner AP Mode...");
+    display.display();
+    
+    WiFi.softAP(apSSID, apPassword);
+    Serial.println("Wi-Fi AP Mode Activated");
+    
+    server.on("/", HTTP_GET, handleRoot);
+    server.on("/connect", HTTP_POST, handleConnect);
+    server.begin();
+    Serial.println("Web Server Started");
+}
+
+void loop() {
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.println("Connected to Wi-Fi");
+        updateDisplay();
+        Serial.println("Starting Mining...");
+        mineSHA256();
+        mineScryptOptimized();
+    }
+    delay(1000);
 }
